@@ -1,7 +1,7 @@
 // Vercel Serverless Function - POST /api/translate
 //
-// Body: { novelId: string, chapterKey: string, text: string, targetLang?: string }
-// Response: { translatedText: string, source: "cache" | "gemini" }
+// Body: { novelId: string, chapterKey: string, text: string, targetLang?: string, engine?: "gemini" | "google" }
+// Response: { translatedText: string, source: "cache" | "gemini" | "google" }
 //
 // Required env vars:
 //   GEMINI_API_KEY
@@ -20,11 +20,15 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { novelId, chapterKey, text, targetLang = "id" } = req.body || {};
+  const { novelId, chapterKey, text, targetLang = "id", engine = "gemini" } = req.body || {};
 
   if (!novelId || !chapterKey || !text) {
     return res.status(400).json({ error: "novelId, chapterKey, dan text wajib diisi." });
   }
+
+  // To keep Gemini and Google translations separate in cache, 
+  // append the engine name to the chapter_key if it's not gemini.
+  const actualChapterKey = engine === "google" ? `${chapterKey}-google` : chapterKey;
 
   try {
     // 1. Check cache first
@@ -32,7 +36,7 @@ export default async function handler(req, res) {
       .from("chapter_translations")
       .select("translated")
       .eq("novel_id", novelId)
-      .eq("chapter_key", chapterKey)
+      .eq("chapter_key", actualChapterKey)
       .eq("target_lang", targetLang)
       .maybeSingle();
 
@@ -40,15 +44,20 @@ export default async function handler(req, res) {
       return res.status(200).json({ translatedText: cached.translated, source: "cache" });
     }
 
-    // 2. Try Gemini
+    // 2. Try translating based on engine
     let translatedText;
     let source;
     try {
-      translatedText = await translateWithGemini(text, targetLang);
-      source = "gemini";
-    } catch (geminiError) {
-      console.error("Gemini translate failed:", geminiError);
-      return res.status(500).json({ error: `Gemini error: ${geminiError.message}` });
+      if (engine === "google") {
+        translatedText = await translateWithGoogleTranslate(text, targetLang);
+        source = "google";
+      } else {
+        translatedText = await translateWithGemini(text, targetLang);
+        source = "gemini";
+      }
+    } catch (translateError) {
+      console.error(`Translation failed (${engine}):`, translateError);
+      return res.status(500).json({ error: `Translation error: ${translateError.message}` });
     }
 
     // 3. Persist to cache (best-effort)
@@ -57,7 +66,7 @@ export default async function handler(req, res) {
       .upsert(
         {
           novel_id: novelId,
-          chapter_key: chapterKey,
+          chapter_key: actualChapterKey,
           target_lang: targetLang,
           source_hash: simpleHash(text),
           translated: translatedText,
@@ -84,9 +93,12 @@ async function translateWithGemini(text, targetLang) {
 
   const langName = targetLang === "id" ? "Bahasa Indonesia" : "English";
   const prompt =
-    `Terjemahkan teks novel Tionghoa berikut ke ${langName}. ` +
-    `Pertahankan nama tokoh, istilah wuxia/xianxia yang lazim, dan nada aslinya. ` +
-    `Balas HANYA dengan hasil terjemahan, tanpa catatan tambahan.\n\n${text}`;
+    `Terjemahkan seluruh teks novel Tionghoa berikut ke ${langName}.\n\n` +
+    `ATURAN WAJIB:\n` +
+    `1. TIDAK BOLEH ADA SATUPUN AKSARA MANDARIN/HANZI YANG TERSISA DI HASIL TERJEMAHAN. Semua karakter Mandarin HARUS dihilangkan atau diterjemahkan.\n` +
+    `2. Semua nama tokoh, tempat, panggilan, atau jurus yang sulit diterjemahkan secara harfiah harus dikonversi ke huruf Latin (Pinyin).\n` +
+    `3. Balas HANYA dengan hasil terjemahan, tanpa catatan, penjelasan, atau teks tambahan apa pun.\n\n` +
+    `Teks:\n${text}`;
 
   const result = await model.generateContent(prompt);
   const response = await result.response;
@@ -95,6 +107,66 @@ async function translateWithGemini(text, targetLang) {
   if (!output.trim()) throw new Error("Gemini mengembalikan hasil kosong");
   console.log(`Gemini success. Output starts with: ${output.trim().substring(0, 50)}...`);
   return output.trim();
+}
+
+async function translateWithGoogleTranslate(text, targetLang) {
+  const chunks = splitForGoogleTranslate(text);
+  const translatedChunks = [];
+
+  for (const chunk of chunks) {
+    const url = new URL("https://translate.googleapis.com/translate_a/single");
+    url.searchParams.set("client", "gtx");
+    url.searchParams.set("sl", "zh-CN");
+    url.searchParams.set("tl", targetLang);
+    url.searchParams.set("dt", "t");
+    url.searchParams.set("q", chunk);
+
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Google Translate error ${response.status}`);
+    const data = await response.json();
+    translatedChunks.push(data[0].map((seg) => seg[0]).join(""));
+  }
+
+  return translatedChunks.join("\n");
+}
+
+function splitForGoogleTranslate(text, maxEncodedLen = 1800) {
+  const paragraphs = text.split("\n");
+  const chunks = [];
+  let current = "";
+
+  for (const p of paragraphs) {
+    const candidate = current ? current + "\n" + p : p;
+    if (encodeURIComponent(candidate).length > maxEncodedLen) {
+      if (current) chunks.push(current);
+      if (encodeURIComponent(p).length > maxEncodedLen) {
+        chunks.push(...hardSplitByEncodedLength(p, maxEncodedLen));
+        current = "";
+      } else {
+        current = p;
+      }
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks.length > 0 ? chunks : [text];
+}
+
+function hardSplitByEncodedLength(text, maxEncodedLen) {
+  const pieces = [];
+  let current = "";
+  for (const char of text) {
+    const candidate = current + char;
+    if (encodeURIComponent(candidate).length > maxEncodedLen) {
+      pieces.push(current);
+      current = char;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) pieces.push(current);
+  return pieces;
 }
 
 function simpleHash(str) {
