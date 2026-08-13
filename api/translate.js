@@ -84,7 +84,7 @@ export default async function handler(req, res) {
   }
 }
 
-async function translateWithGemini(text, targetLang) {
+async function translateWithGemini(text, targetLang, retries = 3) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY belum diset");
 
@@ -102,30 +102,46 @@ async function translateWithGemini(text, targetLang) {
     `5. Balas HANYA dengan hasil terjemahan yang utuh, tanpa catatan, penjelasan, atau teks tambahan apa pun.\n\n` +
     `Teks:\n${text}`;
 
-  const result = await model.generateContent(prompt);
-  const response = await result.response;
-  let output = response.text();
-  
-  if (!output.trim()) throw new Error("Gemini mengembalikan hasil kosong");
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      let output = response.text();
 
-  // Sistem Verifikasi: Cek apakah masih ada karakter Hanzi (Mandarin)
-  const hanziRegex = /[\u4e00-\u9fa5]/;
-  if (hanziRegex.test(output)) {
-    console.warn("Hanzi detected in output! Triggering self-correction...");
-    const correctionPrompt = 
-      `Teks berikut adalah hasil terjemahanmu sebelumnya, namun masih mengandung aksara Mandarin/Hanzi yang terlewat atau belum diterjemahkan:\n\n` +
-      `${output}\n\n` +
-      `TUGAS:\n` +
-      `Tolong perbaiki dan tulis ulang teks di atas. Pastikan kamu menerjemahkan ATAU mengubah seluruh aksara Mandarin yang tersisa menjadi huruf Latin (Pinyin).\n` +
-      `SANGAT PENTING: TIDAK BOLEH ADA SATUPUN aksara Mandarin di jawaban akhirmu. Balas HANYA dengan hasil teks perbaikan yang utuh.`;
-    
-    const correctionResult = await model.generateContent(correctionPrompt);
-    const correctionResponse = await correctionResult.response;
-    output = correctionResponse.text();
+      if (!output.trim()) throw new Error("Gemini mengembalikan hasil kosong");
+
+      // Sistem Verifikasi: Cek apakah masih ada karakter Hanzi (Mandarin)
+      const hanziRegex = /[\u4e00-\u9fa5]/;
+      if (hanziRegex.test(output)) {
+        console.warn("Hanzi detected in output! Triggering self-correction...");
+        const correctionPrompt =
+          `Teks berikut adalah hasil terjemahanmu sebelumnya, namun masih mengandung aksara Mandarin/Hanzi yang terlewat atau belum diterjemahkan:\n\n` +
+          `${output}\n\n` +
+          `TUGAS:\n` +
+          `Tolong perbaiki dan tulis ulang teks di atas. Pastikan kamu menerjemahkan ATAU mengubah seluruh aksara Mandarin yang tersisa menjadi huruf Latin (Pinyin).\n` +
+          `SANGAT PENTING: TIDAK BOLEH ADA SATUPUN aksara Mandarin di jawaban akhirmu. Balas HANYA dengan hasil teks perbaikan yang utuh.`;
+
+        const correctionResult = await model.generateContent(correctionPrompt);
+        const correctionResponse = await correctionResult.response;
+        output = correctionResponse.text();
+      }
+
+      console.log(`Gemini success (attempt ${attempt + 1}). Output starts: ${output.trim().substring(0, 50)}...`);
+      return output.trim();
+
+    } catch (err) {
+      const is429 = err.message?.includes("429") || err.status === 429;
+      if (is429 && attempt < retries) {
+        // Parse retry delay from error if available, otherwise exponential backoff
+        const retryMatch = err.message?.match(/(\d+)s/i);
+        const waitSec = retryMatch ? parseInt(retryMatch[1], 10) + 2 : Math.pow(2, attempt + 2) * 5;
+        console.warn(`Rate limit hit (attempt ${attempt + 1}/${retries + 1}). Waiting ${waitSec}s before retry...`);
+        await new Promise((r) => setTimeout(r, waitSec * 1000));
+        continue;
+      }
+      throw err;
+    }
   }
-
-  console.log(`Gemini success. Output starts with: ${output.trim().substring(0, 50)}...`);
-  return output.trim();
 }
 
 async function translateWithGoogleTranslate(text, targetLang) {

@@ -102,7 +102,7 @@ export default function App() {
     setIsTranslatingAll(true);
     setTranslateAllProgress("");
 
-    const CONCURRENCY = 3;
+    const CONCURRENCY = 2; // Keep at 2 to respect Gemini free-tier token-per-minute limit
 
     // Find all chapters that haven't been successfully translated yet
     const pending = chapters
