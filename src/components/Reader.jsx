@@ -8,50 +8,20 @@ export default function Reader({ novelId, group }) {
   const [showOriginal, setShowOriginal] = useState({});
   const [isTranslatingAll, setIsTranslatingAll] = useState(false);
   const [progressMsg, setProgressMsg] = useState("");
-  const [translationEngine, setTranslationEngine] = useState("gemini"); // gemini, google, both
+  // User prefers Gemini exclusively
+  const translationEngine = "gemini";
 
   async function translateSingleChapter(chapter, index) {
     const chapterKey = `${group.groupIndex}-${index}`;
     setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "loading" } }));
     
     try {
-      let translatedGemini = "";
-      let translatedGoogle = "";
+      // Execute only Gemini since it gives the best results
+      const translatedGemini = await translateChapter({ 
+        novelId, chapterKey, text: chapter.body, engine: "gemini" 
+      });
       
-      // We no longer chunk text here. Send the entire chapter to the backend
-      // to preserve full context for Gemini.
-      
-      // Execute both engines concurrently if "both" is selected.
-      const promises = [];
-      
-      if (translationEngine === "gemini" || translationEngine === "both") {
-        promises.push(
-          translateChapter({ 
-            novelId, chapterKey, text: chapter.body, engine: "gemini" 
-          }).then(res => { translatedGemini = res; })
-        );
-      }
-
-      if (translationEngine === "google" || translationEngine === "both") {
-        promises.push(
-          translateChapter({ 
-            novelId, chapterKey, text: chapter.body, engine: "google" 
-          }).then(res => { translatedGoogle = res; })
-        );
-      }
-      
-      await Promise.all(promises);
-      
-      let finalTranslatedText = "";
-      if (translationEngine === "both") {
-        finalTranslatedText = `[GEMINI]\n${translatedGemini}\n\n[GOOGLE TRANSLATE]\n${translatedGoogle}`;
-      } else if (translationEngine === "gemini") {
-        finalTranslatedText = translatedGemini;
-      } else {
-        finalTranslatedText = translatedGoogle;
-      }
-      
-      setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "done", text: finalTranslatedText } }));
+      setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "done", text: translatedGemini } }));
       return { success: true };
     } catch (err) {
       setTranslations((prev) => ({
@@ -85,7 +55,7 @@ export default function Reader({ novelId, group }) {
 
     const worker = async () => {
       while (currentIndex < chaptersToTranslate.length) {
-        if (!isTranslatingAll) break; // User might have cancelled (if we implement cancel)
+        // Removed stale closure check for isTranslatingAll to prevent early exit
         
         const taskIndex = currentIndex++;
         const { chapter, index } = chaptersToTranslate[taskIndex];
@@ -137,17 +107,9 @@ export default function Reader({ novelId, group }) {
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <h2 className="font-display text-xl">{group.label}</h2>
           <div className="flex flex-wrap items-center gap-3">
-            <select
-              value={translationEngine}
-              onChange={(e) => setTranslationEngine(e.target.value)}
-              disabled={isTranslatingAll}
-              className="text-xs px-3 py-2 rounded-full outline-none"
-              style={{ background: "var(--ink-panel)", border: "1px solid var(--line)", color: "var(--parchment)" }}
-            >
-              <option value="gemini">Mode: Gemini</option>
-              <option value="google">Mode: Google Translate</option>
-              <option value="both">Mode: Dua-duanya</option>
-            </select>
+            <div className="text-xs px-3 py-2 rounded-full" style={{ background: "var(--ink-panel)", border: "1px solid var(--line)", color: "var(--parchment)" }}>
+              Mode: Gemini (AI)
+            </div>
             <button
               onClick={handleTranslateAll}
               disabled={isTranslatingAll}
