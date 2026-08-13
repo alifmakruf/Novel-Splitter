@@ -1,0 +1,49 @@
+@import "tailwindcss";
+
+:root {
+  --ink: #14161b;
+  --ink-panel: #1c1f26;
+  --ink-panel-raised: #242832;
+  --parchment: #ece6d6;
+  --parchment-dim: #a8a394;
+  --seal: #b8433a;
+  --seal-bright: #d65a4d;
+  --gold: #b8935a;
+  --line: #2f333d;
+}
+
+@theme {
+  --font-display: "Noto Serif SC", "Noto Serif", Georgia, serif;
+  --font-body: "Noto Serif", Georgia, serif;
+  --font-ui: "Inter", system-ui, sans-serif;
+}
+
+html, body {
+  background: var(--ink);
+  color: var(--parchment);
+  font-family: var(--font-ui);
+}
+
+* {
+  scrollbar-color: var(--line) transparent;
+}
+
+.font-display { font-family: var(--font-display); }
+.font-body { font-family: var(--font-body); }
+
+.seal-stamp {
+  font-family: var(--font-display);
+  color: var(--seal-bright);
+  border: 2px solid var(--seal-bright);
+  border-radius: 9999px;
+  transform: rotate(-6deg);
+  box-shadow: 0 0 0 2px rgba(214, 90, 77, 0.15);
+}
+
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up {
+  animation: fade-up 0.35s ease-out both;
+}

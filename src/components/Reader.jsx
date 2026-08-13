@@ -1,0 +1,114 @@
+import { useState } from "react";
+import { translateChapter } from "../lib/translate.js";
+
+export default function Reader({ novelId, group }) {
+  // chapterKey -> { text, status: 'idle'|'loading'|'done'|'error' }
+  const [translations, setTranslations] = useState({});
+  const [showOriginal, setShowOriginal] = useState({});
+
+  async function handleTranslate(chapter, index) {
+    const chapterKey = `${group.groupIndex}-${index}`;
+    setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "loading" } }));
+    try {
+      const text = await translateChapter({ novelId, chapterKey, text: chapter.body });
+      setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "done", text } }));
+    } catch (err) {
+      setTranslations((prev) => ({
+        ...prev,
+        [chapterKey]: { status: "error", error: err.message },
+      }));
+    }
+  }
+
+  function handleExportGroup() {
+    const content = group.chapters
+      .map((c, i) => {
+        const chapterKey = `${group.groupIndex}-${i}`;
+        const translated = translations[chapterKey];
+        const body = translated?.status === "done" ? translated.text : c.body;
+        return `${c.title}\n\n${body}`;
+      })
+      .join("\n\n" + "─".repeat(20) + "\n\n");
+
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${novelId}-${group.label.replace(/\s/g, "_")}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <div className="flex-1 min-w-0">
+      <div className="flex items-center justify-between mb-6">
+        <h2 className="font-display text-xl">{group.label}</h2>
+        <button
+          onClick={handleExportGroup}
+          className="text-xs px-4 py-2 rounded-full"
+          style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
+        >
+          Ekspor grup (.txt)
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-8">
+        {group.chapters.map((chapter, i) => {
+          const chapterKey = `${group.groupIndex}-${i}`;
+          const t = translations[chapterKey];
+          const original = showOriginal[chapterKey];
+
+          return (
+            <article
+              key={i}
+              className="rounded-xl p-6"
+              style={{ background: "var(--ink-panel)", border: "1px solid var(--line)" }}
+            >
+              <div className="flex items-start justify-between gap-4 mb-4">
+                <h3 className="font-display text-lg" style={{ color: "var(--gold)" }}>
+                  {chapter.title}
+                </h3>
+                <div className="flex gap-2 shrink-0">
+                  {t?.status === "done" && (
+                    <button
+                      onClick={() =>
+                        setShowOriginal((prev) => ({ ...prev, [chapterKey]: !prev[chapterKey] }))
+                      }
+                      className="text-xs px-3 py-1.5 rounded-full"
+                      style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
+                    >
+                      {original ? "Lihat terjemahan" : "Lihat asli"}
+                    </button>
+                  )}
+                  {t?.status !== "done" && (
+                    <button
+                      onClick={() => handleTranslate(chapter, i)}
+                      disabled={t?.status === "loading"}
+                      className="text-xs px-3 py-1.5 rounded-full"
+                      style={{ background: "var(--seal)", color: "var(--parchment)" }}
+                    >
+                      {t?.status === "loading" ? "Menerjemahkan..." : "Terjemahkan"}
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <p
+                className="font-body whitespace-pre-line leading-relaxed text-[15px]"
+                style={{ color: "var(--parchment)" }}
+              >
+                {t?.status === "done" && !original ? t.text : chapter.body}
+              </p>
+
+              {t?.status === "error" && (
+                <p className="mt-3 text-xs" style={{ color: "var(--seal-bright)" }}>
+                  {t.error}
+                </p>
+              )}
+            </article>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
