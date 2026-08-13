@@ -93,6 +93,7 @@ async function translateWithGemini(text, targetLang) {
   const output = response.text();
   
   if (!output.trim()) throw new Error("Gemini mengembalikan hasil kosong");
+  console.log(`Gemini success. Output starts with: ${output.trim().substring(0, 50)}...`);
   return output.trim();
 }
 
