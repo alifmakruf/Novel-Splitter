@@ -32,6 +32,8 @@ export default function Reader({
   isTranslatingAll,
   onTranslateSingle,
   onRetryWithGoogle,
+  onEnchantWithGemini,
+  onTranslateWithDeepL,
 }) {
   const [showOriginal, setShowOriginal] = useState({});
 
@@ -101,26 +103,63 @@ export default function Reader({
               </button>
             )}
 
-            {t?.status !== "loading" && t?.status !== "done" && (
-              <button
-                onClick={() => onTranslateSingle(globalIndex)}
-                disabled={isTranslatingAll}
-                className="text-xs px-3 py-1.5 rounded-full"
-                style={{ background: "var(--seal)", color: "var(--parchment)" }}
-              >
-                Terjemahkan
-              </button>
+            {t?.status !== "loading" && t?.status !== "done" && t?.status !== "enchanting" && (
+              <>
+                <button
+                  onClick={() => onTranslateSingle(globalIndex)}
+                  disabled={isTranslatingAll}
+                  className="text-xs px-3 py-1.5 rounded-full"
+                  style={{ background: "var(--seal)", color: "var(--parchment)" }}
+                >
+                  Terjemahkan
+                </button>
+                <button
+                  onClick={() => onTranslateWithDeepL(globalIndex)}
+                  disabled={isTranslatingAll}
+                  className="text-xs px-3 py-1.5 rounded-full"
+                  style={{ background: "var(--seal-bright)", color: "var(--ink)" }}
+                >
+                  DeepL
+                </button>
+              </>
             )}
 
-            {t?.status === "error" && (
+            {t?.status === "done" && (
               <button
-                onClick={() => onRetryWithGoogle(globalIndex)}
+                onClick={() => onEnchantWithGemini(globalIndex)}
                 disabled={isTranslatingAll}
                 className="text-xs px-3 py-1.5 rounded-full"
                 style={{ border: "1px solid var(--gold)", color: "var(--gold)" }}
               >
-                Coba Google Translate
+                ✨ Perbaiki dengan Gemini
               </button>
+            )}
+
+            {t?.status === "enchanting" && (
+              <p className="text-xs" style={{ color: "var(--gold)" }}>
+                ⏳ Perbaikan sedang diproses...
+              </p>
+            )}
+
+            {t?.status === "error" && (
+              <>
+                <button
+                  onClick={() => onRetryWithGoogle(globalIndex)}
+                  disabled={isTranslatingAll}
+                  className="text-xs px-3 py-1.5 rounded-full"
+                  style={{ border: "1px solid var(--gold)", color: "var(--gold)" }}
+                >
+                  Coba Google Translate
+                </button>
+                <button
+                  onClick={() => onTranslateWithDeepL(globalIndex)}
+                  disabled={isTranslatingAll}
+                  className="text-xs px-3 py-1.5 rounded-full"
+                  style={{ background: "var(--seal-bright)", color: "var(--ink)" }}
+                >
+                  DeepL
+                </button>
+              </>
             )}
           </div>
         </div>

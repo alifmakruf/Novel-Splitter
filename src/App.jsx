@@ -100,6 +100,63 @@ export default function App() {
     translateOne,
   ]);
 
+  const handleEnchantWithGemini = useCallback(
+    async (globalIndex) => {
+      const chapter = chapters[globalIndex];
+      if (!chapter) return { success: false };
+
+      const chapterKey = makeChapterKey(globalIndex);
+      const currentTranslation = translations[chapterKey]?.text;
+
+      if (!currentTranslation) {
+        setError("Belum ada terjemahan untuk diperbaiki");
+        return { success: false };
+      }
+
+      const enchantKey = `${chapterKey}__enchanted`;
+      setTranslations((prev) => ({ ...prev, [enchantKey]: { status: "enchanting" } }));
+
+      try {
+        const response = await fetch("/api/translate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            novelId,
+            chapterKey: enchantKey,
+            text: chapter.body,
+            targetLang: "id",
+            engine: "gemini",
+            enchantMode: true,
+            previousTranslation: currentTranslation,
+          }),
+        });
+
+        if (!response.ok) {
+          const errBody = await response.json().catch(() => ({}));
+          throw new Error(errBody.error || `Enchant gagal (HTTP ${response.status})`);
+        }
+
+        const data = await response.json();
+        setTranslations((prev) => ({
+          ...prev,
+          [chapterKey]: { status: "done", text: data.translatedText },
+        }));
+        return { success: true };
+      } catch (err) {
+        setTranslations((prev) => ({
+          ...prev,
+          [enchantKey]: { status: "error", error: err.message },
+        }));
+        return { success: false, error: err.message };
+      }
+    },
+    [chapters, novelId, translations]
+  );
+
+  const handleTranslateWithDeepL = useCallback((globalIndex) => translateOne(globalIndex, "deepl"), [
+    translateOne,
+  ]);
+
   // Translate every not-yet-done chapter across the WHOLE book, several at a
   // time (worker-pool pattern), updating each chapter's tab live as it
   // completes. The chapter list/tabs are already visible and navigable the
@@ -278,6 +335,8 @@ export default function App() {
                 isTranslatingAll={isTranslatingAll}
                 onTranslateSingle={translateOne}
                 onRetryWithGoogle={handleRetryWithGoogle}
+                onEnchantWithGemini={handleEnchantWithGemini}
+                onTranslateWithDeepL={handleTranslateWithDeepL}
               />
             </div>
           </div>

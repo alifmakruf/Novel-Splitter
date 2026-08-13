@@ -8,16 +8,19 @@ kelompok 10 bab, meninjau/mengoreksi batas bab secara manual, lalu menerjemahkan
 
 Sudah jalan:
 - Parsing multi-format (txt/html/mhtml/epub) — dijalankan di **browser**, tidak upload file ke server.
-- Deteksi otomatis batas bab (`第X章` / `第X回` / `第X节` / `第X卷`, angka Arab maupun Hanzi).
+- Deteksi otomatis batas bab (`第X章` / `第X回` / `第X节`, angka Arab maupun Hanzi), **dan deteksi jilid/volume (`第X卷` / `卷X`) secara hierarkis** — kalau novelnya punya struktur jilid dengan nomor bab yang reset tiap jilid, itu ditangani dengan benar (dikelompokkan per jilid, nomor bab yang ditampilkan relatif ke jilidnya masing-masing, bukan nomor global yang membingungkan).
 - UI koreksi manual (gabung bab yang salah pecah, ganti judul).
-- Pengelompokan otomatis per 10 bab + navigasi.
-- Backend proxy terjemahan (`api/translate.js`) dengan cache Supabase + fallback Google Translate.
-- Ekspor per-grup ke `.txt`.
+- Pengelompokan per 10 bab (sidebar `GroupNav`) + **tab per-bab** di dalam tiap grup (`ChapterTabs`), tiap tab punya indikator status ⏳/✅/❌.
+- Konten bab ditampilkan **per paragraf** (bukan satu blok teks besar).
+- Struktur bab langsung tampil begitu file selesai di-parse — terjemahan diisi **progresif di background**, tidak perlu menunggu seluruh buku selesai diterjemahkan dulu.
+- Tombol "Terjemahkan Semua" — antrian worker-pool (2 bab paralel) lintas seluruh buku, menghormati rate-limit free-tier Gemini.
+- Backend (`api/translate.js`): retry otomatis saat kena rate-limit 429, deteksi & minta-perbaiki-ulang kalau hasil masih menyisakan aksara Hanzi, cache Supabase, fallback otomatis ke Google Translate kalau Gemini gagal total, plus tombol manual "Coba Google Translate" per bab yang error.
+- **Glosarium per novel** (`novel_glossary` table): tiap kali Gemini nerjemahkan bab, dia juga nyebutin nama tokoh/istilah baru yang muncul, disimpan ke database. Bab-bab berikutnya otomatis dikasih daftar istilah yang sudah baku supaya konsisten (nama tokoh nggak berubah-ubah terjemahannya tiap bab).
+- Ekspor per-bab dan ekspor seluruh buku ke `.txt`.
 
 Belum diimplementasikan (silakan lanjutkan sendiri atau minta bantuan lagi):
 - Ekspor ke `.epub`.
 - Auth/rate-limit per user (penting kalau app ini publik — lihat catatan di bawah).
-- Progress bar background-translate untuk 10 bab sekaligus (saat ini per-bab, manual klik).
 
 ## Menjalankan secara lokal
 
@@ -45,6 +48,17 @@ di bawah (secara lokal, `vercel dev` bisa dipakai untuk menjalankan serverless f
      translated   text not null,
      created_at   timestamptz default now(),
      unique (novel_id, chapter_key, target_lang)
+   );
+
+   -- Glosarium istilah/nama per novel, dipakai supaya Gemini konsisten
+   -- menerjemahkan nama tokoh/tempat yang sama di setiap bab.
+   create table novel_glossary (
+     id               bigint generated always as identity primary key,
+     novel_id         text not null,
+     term_zh          text not null,
+     term_translated  text not null,
+     created_at       timestamptz default now(),
+     unique (novel_id, term_zh)
    );
    ```
 

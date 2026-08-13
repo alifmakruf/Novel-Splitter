@@ -1,9 +1,9 @@
 // Vercel Serverless Function - POST /api/translate
 //
-// Body: { novelId, chapterKey, text, targetLang?, engine?: "gemini" | "google" }
-// Response: { translatedText, source: "cache" | "gemini" | "google" }
+// Body: { novelId, chapterKey, text, targetLang?, engine?: "gemini" | "google" | "deepl" }
+// Response: { translatedText, source: "cache" | "gemini" | "google" | "deepl" }
 //
-// Required env vars: GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+// Required env vars: GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, DEEPL_API_KEY (optional)
 //
 // Behavior:
 //   engine="gemini" (default) -> try Gemini (with retry on 429 + Hanzi
@@ -11,6 +11,7 @@
 //     to the free Google Translate endpoint automatically.
 //   engine="google" -> use Google Translate directly (useful for a manual
 //     "translate with Google instead" retry button in the UI).
+//   engine="deepl" -> use DeepL API (requires DEEPL_API_KEY env var).
 
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -24,33 +25,44 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { novelId, chapterKey, text, targetLang = "id", engine = "gemini" } = req.body || {};
+  const { novelId, chapterKey, text, targetLang = "id", engine = "gemini", enchantMode = false, previousTranslation = null } = req.body || {};
 
   if (!novelId || !chapterKey || !text) {
     return res.status(400).json({ error: "novelId, chapterKey, dan text wajib diisi." });
   }
 
-  // Keep Gemini and Google results as separate cache entries so a manual
-  // "coba Google Translate" retry doesn't collide with the Gemini cache.
-  const actualChapterKey = engine === "google" ? `${chapterKey}__google` : chapterKey;
+  // Keep Gemini, Google, and DeepL results as separate cache entries so manual
+  // retries don't collide with different engine caches.
+  let actualChapterKey = chapterKey;
+  if (engine === "google") actualChapterKey = `${chapterKey}__google`;
+  if (engine === "deepl") actualChapterKey = `${chapterKey}__deepl`;
 
   try {
-    const { data: cached } = await supabase
-      .from("chapter_translations")
-      .select("translated")
-      .eq("novel_id", novelId)
-      .eq("chapter_key", actualChapterKey)
-      .eq("target_lang", targetLang)
-      .maybeSingle();
+    // Skip cache for enchant mode (always re-run improvement)
+    if (!enchantMode) {
+      const { data: cached } = await supabase
+        .from("chapter_translations")
+        .select("translated")
+        .eq("novel_id", novelId)
+        .eq("chapter_key", actualChapterKey)
+        .eq("target_lang", targetLang)
+        .maybeSingle();
 
-    if (cached) {
-      return res.status(200).json({ translatedText: cached.translated, source: "cache" });
+      if (cached) {
+        return res.status(200).json({ translatedText: cached.translated, source: "cache" });
+      }
     }
 
     let translatedText;
     let source;
 
-    if (engine === "google") {
+    if (enchantMode && previousTranslation) {
+      translatedText = await enchantWithGemini(text, previousTranslation, novelId);
+      source = "gemini-enchant";
+    } else if (engine === "deepl") {
+      translatedText = await translateWithDeepL(text, targetLang);
+      source = "deepl";
+    } else if (engine === "google") {
       translatedText = await translateWithGoogleTranslate(text, targetLang);
       source = "google";
     } else {
@@ -85,6 +97,88 @@ export default async function handler(req, res) {
     console.error(err);
     return res.status(500).json({ error: err.message || "Translasi gagal di server." });
   }
+}
+
+async function enchantWithGemini(originalText, previousTranslation, novelId, retries = 2) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error("GEMINI_API_KEY belum diset");
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
+
+  const prompt =
+    `Terjemahan berikut ini sudah dibuat oleh DeepL. Tugas kamu adalah IMPROVE kualitasnya tanpa mengubah isi:\n\n` +
+    `[TEKS ASLI MANDARIN]:\n${originalText}\n\n` +
+    `[TERJEMAHAN DEEPL (SEKARANG)]:\n${previousTranslation}\n\n` +
+    `PANDUAN IMPROVEMENT:\n` +
+    `1. Perbaiki grammar dan awkward phrasing (tapi keep structure)\n` +
+    `2. Handle idiom/chengyu Mandarin agar lebih natural\n` +
+    `3. Tingkatkan flow dan readability\n` +
+    `4. Pastikan konsistensi tone dan style\n` +
+    `5. TIDAK BOLEH ADA SATUPUN HANZI yang tersisa\n` +
+    `6. Jangan merubah paragraph breaks\n\n` +
+    `Balas HANYA dengan terjemahan yang sudah diperbaiki. Jangan ada penjelasan atau catatan lain.`;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const result = await model.generateContent(prompt);
+      let improved = result.response.text().trim();
+
+      if (HANZI_RE.test(improved)) {
+        console.warn("Hanzi terdeteksi di enchant output, minta koreksi...");
+        const correctionResult = await model.generateContent(
+          `Output berikut masih punya Hanzi:\n\n${improved}\n\nHapus SEMUA Hanzi (ubah ke Pinyin atau terjemahan Indonesia). Balas HANYA dengan teks yang sudah diperbaiki.`
+        );
+        improved = correctionResult.response.text().trim();
+      }
+
+      return improved;
+    } catch (err) {
+      const is429 = err.message?.includes("429") || err.status === 429;
+      if (is429 && attempt < retries) {
+        const waitSec = Math.pow(2, attempt + 2) * 5;
+        console.warn(`Rate limit di enchant (attempt ${attempt + 1}/${retries + 1}). Tunggu ${waitSec}s...`);
+        await new Promise((r) => setTimeout(r, waitSec * 1000));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+async function translateWithDeepL(text, targetLang) {
+  const apiKey = process.env.DEEPL_API_KEY;
+  if (!apiKey) throw new Error("DEEPL_API_KEY belum diset di environment variables");
+
+  // DeepL language codes: zh (Chinese) -> id (Indonesian), en, etc.
+  const targetLangCode = targetLang === "id" ? "ID" : targetLang.toUpperCase();
+
+  const url = "https://api-free.deepl.com/v1/translate"; // Free tier endpoint
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `DeepL-Auth-Key ${apiKey}`,
+    },
+    body: JSON.stringify({
+      text: [text],
+      source_lang: "ZH", // Chinese (simplified/traditional, DeepL handles both)
+      target_lang: targetLangCode,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(`DeepL API error ${response.status}: ${errorData.message || response.statusText}`);
+  }
+
+  const data = await response.json();
+  if (!data.translations || data.translations.length === 0) {
+    throw new Error("DeepL returned empty translation");
+  }
+
+  return data.translations[0].text;
 }
 
 async function translateWithGemini(text, targetLang, novelId, retries = 3) {

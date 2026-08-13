@@ -91,13 +91,23 @@ export function splitIntoChapters(rawText) {
 // like before. Every group carries `globalOffset` - the index of its first
 // chapter in the full flat `chapters` array - so callers never have to
 // assume a fixed group size when computing a chapter's global index.
+//
+// UPDATED: Now also stores `globalNumberStart` in each chapter to support
+// global chapter numbering (1, 2, 3, ... across all volumes) instead of
+// numbering that resets per volume (1, 2, 3 then 1, 2, 3 again).
 export function groupChapters(chapters, size = 10) {
   const hasVolumes = chapters.some((c) => c.volumeLabel);
 
+  // Add globalNumber to each chapter (1-indexed across entire novel)
+  const chaptersWithGlobalNumbers = chapters.map((c, idx) => ({
+    ...c,
+    globalNumber: idx + 1,
+  }));
+
   if (!hasVolumes) {
     const groups = [];
-    for (let i = 0; i < chapters.length; i += size) {
-      const slice = chapters.slice(i, i + size);
+    for (let i = 0; i < chaptersWithGlobalNumbers.length; i += size) {
+      const slice = chaptersWithGlobalNumbers.slice(i, i + size);
       groups.push({
         groupIndex: groups.length,
         label: `Bab ${i + 1}–${i + slice.length}`,
@@ -109,16 +119,16 @@ export function groupChapters(chapters, size = 10) {
   }
 
   const groups = [];
-  let currentLabel = chapters[0]?.volumeLabel ?? "Pembuka";
+  let currentLabel = chaptersWithGlobalNumbers[0]?.volumeLabel ?? "Pembuka";
   let start = 0;
 
-  for (let i = 0; i <= chapters.length; i++) {
-    const label = i < chapters.length ? chapters[i].volumeLabel ?? "Pembuka" : null;
+  for (let i = 0; i <= chaptersWithGlobalNumbers.length; i++) {
+    const label = i < chaptersWithGlobalNumbers.length ? chaptersWithGlobalNumbers[i].volumeLabel ?? "Pembuka" : null;
     if (label !== currentLabel) {
       groups.push({
         groupIndex: groups.length,
         label: currentLabel,
-        chapters: chapters.slice(start, i),
+        chapters: chaptersWithGlobalNumbers.slice(start, i),
         globalOffset: start,
       });
       start = i;

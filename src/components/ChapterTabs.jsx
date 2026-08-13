@@ -1,4 +1,4 @@
-const STATUS_ICON = { done: "✅", loading: "⏳", error: "❌" };
+const STATUS_ICON = { done: "✅", loading: "⏳", enchanting: "✨", error: "❌" };
 
 export default function ChapterTabs({ chapters, groupGlobalOffset, activeLocalIndex, translations, onSelect }) {
   return (
@@ -20,7 +20,7 @@ export default function ChapterTabs({ chapters, groupGlobalOffset, activeLocalIn
               color: isActive ? "var(--parchment)" : "var(--parchment-dim)",
             }}
           >
-            <span>Bab {chapter.numberInVolume ?? globalIndex + 1}</span>
+            <span>Bab {chapter.globalNumber ?? globalIndex + 1}</span>
             {status && <span style={{ fontSize: "10px" }}>{STATUS_ICON[status]}</span>}
           </button>
         );
