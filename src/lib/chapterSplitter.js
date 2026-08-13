@@ -43,7 +43,7 @@ export function groupChapters(chapters, size = 10) {
     const slice = chapters.slice(i, i + size);
     groups.push({
       groupIndex: groups.length,
-      label: size === 1 ? `Bab ${i + 1}` : `Bab ${i + 1}–${i + slice.length}`,
+      label: `Bab ${i + 1}–${i + slice.length}`,
       chapters: slice,
     });
   }

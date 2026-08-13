@@ -1,16 +1,11 @@
-const makeChapterKey = (globalIndex) => `chapter-${globalIndex}`;
-
 export default function GroupNav({ groups, activeGroupIndex, onSelectGroup, translations = {} }) {
   return (
-    <nav className="flex md:flex-col gap-2 overflow-x-auto md:overflow-visible pb-2 md:pb-0 md:w-40 shrink-0">
+    <nav className="flex md:flex-col gap-2 overflow-x-auto md:overflow-visible pb-2 md:pb-0 md:w-44 shrink-0">
       {groups.map((group) => {
         const isActive = group.groupIndex === activeGroupIndex;
-        // Each group has exactly 1 chapter (groupSize=1), so globalIndex = groupIndex
-        const globalIndex = group.groupIndex;
-        const t = translations[makeChapterKey(globalIndex)];
-        const isDone = t?.status === "done";
-        const isLoading = t?.status === "loading";
-        const isError = t?.status === "error";
+        const doneInGroup = group.chapters.filter(
+          (_, i) => translations[`chapter-${group.groupIndex * 10 + i}`]?.status === "done"
+        ).length;
 
         return (
           <button
@@ -27,15 +22,19 @@ export default function GroupNav({ groups, activeGroupIndex, onSelectGroup, tran
             >
               {group.groupIndex + 1}
             </span>
-            <span
-              className="text-sm whitespace-nowrap flex-1"
-              style={{ color: isActive ? "var(--parchment)" : "var(--parchment-dim)" }}
-            >
-              {group.label}
+            <span className="flex flex-col">
+              <span
+                className="text-sm whitespace-nowrap"
+                style={{ color: isActive ? "var(--parchment)" : "var(--parchment-dim)" }}
+              >
+                {group.label}
+              </span>
+              {doneInGroup > 0 && (
+                <span className="text-[10px]" style={{ color: "var(--gold)" }}>
+                  {doneInGroup}/{group.chapters.length} selesai
+                </span>
+              )}
             </span>
-            {isDone && <span title="Selesai" style={{ fontSize: "10px" }}>✅</span>}
-            {isLoading && <span title="Sedang diterjemahkan" style={{ fontSize: "10px" }}>⏳</span>}
-            {isError && <span title="Error" style={{ fontSize: "10px" }}>❌</span>}
           </button>
         );
       })}

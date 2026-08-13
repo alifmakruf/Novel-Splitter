@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { useCallback, useMemo, useState } from "react";
 import FileUpload from "./components/FileUpload.jsx";
 import ChapterEditor from "./components/ChapterEditor.jsx";
 import GroupNav from "./components/GroupNav.jsx";
@@ -6,6 +6,9 @@ import Reader from "./components/Reader.jsx";
 import { parseFile } from "./lib/parsers/index.js";
 import { splitIntoChapters, groupChapters } from "./lib/chapterSplitter.js";
 import { translateChapter } from "./lib/translate.js";
+
+const makeChapterKey = (globalIndex) => `chapter-${globalIndex}`;
+const TRANSLATE_ALL_CONCURRENCY = 2; // keep low to respect Gemini free-tier RPM
 
 // stage: 'upload' -> 'review' -> 'read'
 export default function App() {
@@ -15,28 +18,32 @@ export default function App() {
 
   const [novelId, setNovelId] = useState(null);
   const [chapters, setChapters] = useState([]);
-  const [activeGroupIndex, setActiveGroupIndex] = useState(0);
 
-  // Global translation state: chapterKey -> { status, text, error }
-  // chapterKey = "chapter-{globalIndex}" — stable, independent of group size
+  const [activeGroupIndex, setActiveGroupIndex] = useState(0);
+  const [activeLocalIndex, setActiveLocalIndex] = useState(0);
+
+  // Global per-chapter translation state, keyed by "chapter-<globalIndex>".
+  // Structure (chapters/groups) is known immediately after parsing and never
+  // depends on translation - we render it right away and fill translations
+  // in progressively in the background, rather than waiting for the whole
+  // book to finish translating before showing anything.
   const [translations, setTranslations] = useState({});
   const [isTranslatingAll, setIsTranslatingAll] = useState(false);
-  const [translateAllProgress, setTranslateAllProgress] = useState("");
+  const [queueStatus, setQueueStatus] = useState("");
 
-  const groups = useMemo(() => groupChapters(chapters, 1), [chapters]);
-
-  // Stable key function: always based on global chapter index
-  const makeChapterKey = (globalIndex) => `chapter-${globalIndex}`;
+  const groups = useMemo(() => groupChapters(chapters, 10), [chapters]);
 
   async function handleFileSelected(file) {
     setError(null);
     setIsProcessing(true);
-    setTranslations({});
     try {
       const { rawText } = await parseFile(file);
       const detected = splitIntoChapters(rawText);
       setChapters(detected);
       setNovelId(slugify(file.name));
+      setActiveGroupIndex(0);
+      setActiveLocalIndex(0);
+      setTranslations({});
       setStage("review");
     } catch (err) {
       setError(err.message);
@@ -66,101 +73,86 @@ export default function App() {
     });
   }
 
-  // Translate a single chapter by its global index
-  const translateSingleChapter = useCallback(async (globalIndex) => {
-    const chapter = chapters[globalIndex];
-    if (!chapter) return { success: false, error: "Bab tidak ditemukan" };
+  const translateOne = useCallback(
+    async (globalIndex, engine = "gemini") => {
+      const chapter = chapters[globalIndex];
+      if (!chapter) return { success: false };
 
-    const chapterKey = makeChapterKey(globalIndex);
+      const chapterKey = makeChapterKey(globalIndex);
+      setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "loading" } }));
 
-    setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "loading" } }));
+      try {
+        const text = await translateChapter({ novelId, chapterKey, text: chapter.body, engine });
+        setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "done", text } }));
+        return { success: true };
+      } catch (err) {
+        setTranslations((prev) => ({
+          ...prev,
+          [chapterKey]: { status: "error", error: err.message },
+        }));
+        return { success: false, error: err.message };
+      }
+    },
+    [chapters, novelId]
+  );
 
-    try {
-      const translatedText = await translateChapter({
-        novelId,
-        chapterKey,
-        text: chapter.body,
-        engine: "gemini",
-      });
+  const handleRetryWithGoogle = useCallback((globalIndex) => translateOne(globalIndex, "google"), [
+    translateOne,
+  ]);
 
-      setTranslations((prev) => ({
-        ...prev,
-        [chapterKey]: { status: "done", text: translatedText },
-      }));
-      return { success: true };
-    } catch (err) {
-      setTranslations((prev) => ({
-        ...prev,
-        [chapterKey]: { status: "error", error: err.message },
-      }));
-      return { success: false, error: err.message };
-    }
-  }, [chapters, novelId]);
-
-  // Translate ALL chapters across ALL groups, 3 concurrent
+  // Translate every not-yet-done chapter across the WHOLE book, several at a
+  // time (worker-pool pattern), updating each chapter's tab live as it
+  // completes. The chapter list/tabs are already visible and navigable the
+  // entire time - this only fills in content in the background.
   const handleTranslateAll = useCallback(async () => {
     setIsTranslatingAll(true);
-    setTranslateAllProgress("");
 
-    const CONCURRENCY = 2; // Keep at 2 to respect Gemini free-tier token-per-minute limit
-
-    // Find all chapters that haven't been successfully translated yet
     const pending = chapters
       .map((_, i) => i)
       .filter((i) => translations[makeChapterKey(i)]?.status !== "done");
 
     if (pending.length === 0) {
-      setTranslateAllProgress("Semua bab sudah diterjemahkan.");
+      setQueueStatus("Semua bab sudah diterjemahkan.");
       setIsTranslatingAll(false);
       return;
     }
 
-    setTranslateAllProgress(`Menerjemahkan ${pending.length} bab tersisa...`);
-
     let cursor = 0;
-    let done = 0;
-    let hasError = false;
+    let completed = 0;
+    let hadError = false;
 
-    const worker = async () => {
+    async function worker() {
       while (cursor < pending.length) {
-        const taskPos = cursor++;
-        const globalIndex = pending[taskPos];
-
-        setTranslateAllProgress(
-          `Menerjemahkan bab ${globalIndex + 1}/${chapters.length}... (${done + 1}/${pending.length})`
-        );
-
-        const result = await translateSingleChapter(globalIndex);
-        done++;
-
-        if (!result.success) {
-          console.error(`Bab ${globalIndex + 1} error:`, result.error);
-          hasError = true;
-        }
+        const globalIndex = pending[cursor++];
+        setQueueStatus(`Menerjemahkan bab ${globalIndex + 1} (${completed + 1}/${pending.length})...`);
+        const result = await translateOne(globalIndex);
+        completed++;
+        if (!result.success) hadError = true;
       }
-    };
+    }
 
-    const workers = Array.from(
-      { length: Math.min(CONCURRENCY, pending.length) },
-      () => worker()
+    await Promise.all(
+      Array.from({ length: Math.min(TRANSLATE_ALL_CONCURRENCY, pending.length) }, worker)
     );
-    await Promise.all(workers);
 
-    setTranslateAllProgress(
-      hasError
-        ? `Selesai dengan beberapa error. Cek bab yang berstatus error.`
-        : `Selesai! Semua ${pending.length} bab telah diterjemahkan.`
+    setQueueStatus(
+      hadError
+        ? "Selesai dengan beberapa error - cek tab bab yang bertanda ❌."
+        : `Selesai! ${pending.length} bab berhasil diterjemahkan.`
     );
     setIsTranslatingAll(false);
-  }, [chapters, translations, translateSingleChapter]);
+  }, [chapters, translations, translateOne]);
 
-  // Export ALL translated chapters as one file
-  const handleExportAll = useCallback(() => {
+  function handleSelectGroup(groupIndex) {
+    setActiveGroupIndex(groupIndex);
+    setActiveLocalIndex(0);
+  }
+
+  function handleExportAll() {
     const content = chapters
       .map((c, i) => {
-        const key = makeChapterKey(i);
-        const t = translations[key];
-        const body = t?.status === "done" ? t.text : c.body;
+        const t = translations[makeChapterKey(i)];
+        const body = t?.status === "done" ? t.text : `[Belum diterjemahkan]\n\n${c.body}`;
         return `${c.title}\n\n${body}`;
       })
       .join("\n\n" + "─".repeat(20) + "\n\n");
@@ -169,17 +161,17 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `${novelId}-terjemahan.txt`;
+    a.download = `${novelId}-terjemahan-lengkap.txt`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [chapters, translations, novelId]);
+  }
 
-  const doneCount = Object.values(translations).filter((t) => t.status === "done").length;
+  const doneCount = chapters.filter((_, i) => translations[makeChapterKey(i)]?.status === "done").length;
 
   return (
     <div className="min-h-screen" style={{ background: "var(--ink)" }}>
-      <header className="border-b" style={{ borderColor: "var(--line)" }}>
-        <div className="max-w-5xl mx-auto px-6 py-4 flex items-center justify-between">
+      <header className="border-b sticky top-0 z-10" style={{ borderColor: "var(--line)", background: "var(--ink)" }}>
+        <div className="max-w-6xl mx-auto px-6 py-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-baseline gap-2">
             <span className="font-display text-lg" style={{ color: "var(--parchment)" }}>
               拆本
@@ -188,6 +180,30 @@ export default function App() {
               Novel Splitter
             </span>
           </div>
+
+          {stage === "read" && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xs" style={{ color: "var(--parchment-dim)" }}>
+                {doneCount}/{chapters.length} bab selesai
+              </span>
+              <button
+                onClick={handleTranslateAll}
+                disabled={isTranslatingAll}
+                className="text-xs px-4 py-2 rounded-full"
+                style={{ background: "var(--seal)", color: "var(--parchment)" }}
+              >
+                {isTranslatingAll ? "Menerjemahkan..." : "Terjemahkan Semua"}
+              </button>
+              <button
+                onClick={handleExportAll}
+                className="text-xs px-3 py-2 rounded-full"
+                style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
+              >
+                Ekspor semua (.txt)
+              </button>
+            </div>
+          )}
+
           {stage !== "upload" && (
             <button
               onClick={() => {
@@ -195,7 +211,8 @@ export default function App() {
                 setChapters([]);
                 setTranslations({});
                 setActiveGroupIndex(0);
-                setTranslateAllProgress("");
+                setActiveLocalIndex(0);
+                setQueueStatus("");
               }}
               className="text-xs px-3 py-1.5 rounded-full"
               style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
@@ -204,9 +221,22 @@ export default function App() {
             </button>
           )}
         </div>
+
+        {stage === "read" && chapters.length > 0 && (
+          <div style={{ height: "3px", background: "var(--line)" }}>
+            <div
+              style={{
+                height: "100%",
+                background: isTranslatingAll ? "var(--gold)" : "var(--seal)",
+                width: `${(doneCount / chapters.length) * 100}%`,
+                transition: "width 0.4s ease",
+              }}
+            />
+          </div>
+        )}
       </header>
 
-      <main className="max-w-5xl mx-auto px-6 py-12">
+      <main className="max-w-6xl mx-auto px-6 py-10">
         {stage === "upload" && (
           <FileUpload onFileSelected={handleFileSelected} isProcessing={isProcessing} error={error} />
         )}
@@ -222,40 +252,12 @@ export default function App() {
 
         {stage === "read" && (
           <div className="flex flex-col gap-4">
-            {/* Global toolbar: translate all + export all */}
-            <div className="flex flex-wrap items-center gap-3 mb-2">
-              <span
-                className="text-xs px-3 py-2 rounded-full"
-                style={{ background: "var(--ink-panel)", border: "1px solid var(--line)", color: "var(--parchment)" }}
-              >
-                Mode: Gemini (AI)
-              </span>
-              <button
-                onClick={handleTranslateAll}
-                disabled={isTranslatingAll}
-                className="text-xs px-4 py-2 rounded-full"
-                style={{ background: "var(--seal)", color: "var(--parchment)" }}
-              >
-                {isTranslatingAll ? "Menerjemahkan..." : "Terjemahkan Semua Bab"}
-              </button>
-              <button
-                onClick={handleExportAll}
-                disabled={isTranslatingAll}
-                className="text-xs px-4 py-2 rounded-full"
-                style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
-              >
-                Ekspor Semua (.txt)
-              </button>
-              <span className="text-xs" style={{ color: "var(--parchment-dim)" }}>
-                {doneCount}/{chapters.length} bab selesai
-              </span>
-            </div>
-            {translateAllProgress && (
+            {queueStatus && (
               <div
-                className="text-sm px-4 py-2 rounded mb-2"
+                className="text-sm px-4 py-2 rounded-lg"
                 style={{ background: "var(--ink-panel)", color: "var(--gold)" }}
               >
-                {translateAllProgress}
+                {queueStatus}
               </div>
             )}
 
@@ -263,16 +265,19 @@ export default function App() {
               <GroupNav
                 groups={groups}
                 activeGroupIndex={activeGroupIndex}
-                onSelectGroup={setActiveGroupIndex}
+                onSelectGroup={handleSelectGroup}
                 translations={translations}
               />
               <Reader
                 novelId={novelId}
                 group={groups[activeGroupIndex]}
-                groupGlobalOffset={activeGroupIndex}
+                groupGlobalOffset={activeGroupIndex * 10}
+                activeLocalIndex={activeLocalIndex}
+                onSelectLocalIndex={setActiveLocalIndex}
                 translations={translations}
                 isTranslatingAll={isTranslatingAll}
-                onTranslateSingle={translateSingleChapter}
+                onTranslateSingle={translateOne}
+                onRetryWithGoogle={handleRetryWithGoogle}
               />
             </div>
           </div>

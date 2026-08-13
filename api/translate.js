@@ -1,19 +1,23 @@
 // Vercel Serverless Function - POST /api/translate
 //
-// Body: { novelId: string, chapterKey: string, text: string, targetLang?: string, engine?: "gemini" | "google" }
-// Response: { translatedText: string, source: "cache" | "gemini" | "google" }
+// Body: { novelId, chapterKey, text, targetLang?, engine?: "gemini" | "google" }
+// Response: { translatedText, source: "cache" | "gemini" | "google" }
 //
-// Required env vars:
-//   GEMINI_API_KEY
-//   SUPABASE_URL
-//   SUPABASE_SERVICE_ROLE_KEY
+// Required env vars: GEMINI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+//
+// Behavior:
+//   engine="gemini" (default) -> try Gemini (with retry on 429 + Hanzi
+//     self-correction pass), and if it still fails after retries, fall back
+//     to the free Google Translate endpoint automatically.
+//   engine="google" -> use Google Translate directly (useful for a manual
+//     "translate with Google instead" retry button in the UI).
 
 import { createClient } from "@supabase/supabase-js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-
 const GEMINI_MODEL = "gemini-3.1-flash-lite";
+const HANZI_RE = /[\u4e00-\u9fa5]/;
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
@@ -26,12 +30,11 @@ export default async function handler(req, res) {
     return res.status(400).json({ error: "novelId, chapterKey, dan text wajib diisi." });
   }
 
-  // To keep Gemini and Google translations separate in cache, 
-  // append the engine name to the chapter_key if it's not gemini.
-  const actualChapterKey = engine === "google" ? `${chapterKey}-google` : chapterKey;
+  // Keep Gemini and Google results as separate cache entries so a manual
+  // "coba Google Translate" retry doesn't collide with the Gemini cache.
+  const actualChapterKey = engine === "google" ? `${chapterKey}__google` : chapterKey;
 
   try {
-    // 1. Check cache first
     const { data: cached } = await supabase
       .from("chapter_translations")
       .select("translated")
@@ -44,23 +47,23 @@ export default async function handler(req, res) {
       return res.status(200).json({ translatedText: cached.translated, source: "cache" });
     }
 
-    // 2. Try translating based on engine
     let translatedText;
     let source;
-    try {
-      if (engine === "google") {
-        translatedText = await translateWithGoogleTranslate(text, targetLang);
-        source = "google";
-      } else {
+
+    if (engine === "google") {
+      translatedText = await translateWithGoogleTranslate(text, targetLang);
+      source = "google";
+    } else {
+      try {
         translatedText = await translateWithGemini(text, targetLang);
         source = "gemini";
+      } catch (geminiError) {
+        console.warn("Gemini failed after retries, falling back to Google:", geminiError.message);
+        translatedText = await translateWithGoogleTranslate(text, targetLang);
+        source = "google";
       }
-    } catch (translateError) {
-      console.error(`Translation failed (${engine}):`, translateError);
-      return res.status(500).json({ error: `Translation error: ${translateError.message}` });
     }
 
-    // 3. Persist to cache (best-effort)
     await supabase
       .from("chapter_translations")
       .upsert(
@@ -80,7 +83,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ translatedText, source });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: "Translasi gagal di server." });
+    return res.status(500).json({ error: err.message || "Translasi gagal di server." });
   }
 }
 
@@ -96,52 +99,51 @@ async function translateWithGemini(text, targetLang, retries = 3) {
     `Terjemahkan seluruh teks novel Tionghoa berikut ke ${langName}.\n\n` +
     `ATURAN WAJIB:\n` +
     `1. Terjemahkan dengan natural, perhatikan konteks cerita keseluruhan bab ini. Jangan menerjemahkan kata per kata (harfiah) jika itu merusak makna kalimat.\n` +
-    `2. Perhatikan idiom (chengyu) dan penggabungan karakter khusus agar makna aslinya tidak melenceng.\n` +
-    `3. TIDAK BOLEH ADA SATUPUN AKSARA MANDARIN/HANZI YANG TERSISA DI HASIL TERJEMAHAN. Semua karakter Mandarin HARUS dihilangkan atau diterjemahkan.\n` +
-    `4. Semua nama tokoh, tempat, panggilan, atau jurus yang sulit diterjemahkan secara harfiah harus dikonversi ke huruf Latin (Pinyin).\n` +
-    `5. Balas HANYA dengan hasil terjemahan yang utuh, tanpa catatan, penjelasan, atau teks tambahan apa pun.\n\n` +
+    `2. Perhatikan idiom (chengyu) dan istilah khas agar makna aslinya tidak melenceng.\n` +
+    `3. TIDAK BOLEH ADA SATUPUN AKSARA MANDARIN/HANZI YANG TERSISA di hasil terjemahan.\n` +
+    `4. Nama tokoh/tempat/jurus yang sulit diterjemahkan harfiah dikonversi ke Pinyin.\n` +
+    `5. Pertahankan jeda paragraf asli (baris baru) apa adanya, jangan digabung jadi satu paragraf besar.\n` +
+    `6. Balas HANYA dengan hasil terjemahan yang utuh, tanpa catatan atau teks tambahan.\n\n` +
     `Teks:\n${text}`;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const result = await model.generateContent(prompt);
-      const response = await result.response;
-      let output = response.text();
+      let output = result.response.text().trim();
 
-      if (!output.trim()) throw new Error("Gemini mengembalikan hasil kosong");
+      if (!output) throw new Error("Gemini mengembalikan hasil kosong");
 
-      // Sistem Verifikasi: Cek apakah masih ada karakter Hanzi (Mandarin)
-      const hanziRegex = /[\u4e00-\u9fa5]/;
-      if (hanziRegex.test(output)) {
-        console.warn("Hanzi detected in output! Triggering self-correction...");
-        const correctionPrompt =
-          `Teks berikut adalah hasil terjemahanmu sebelumnya, namun masih mengandung aksara Mandarin/Hanzi yang terlewat atau belum diterjemahkan:\n\n` +
-          `${output}\n\n` +
-          `TUGAS:\n` +
-          `Tolong perbaiki dan tulis ulang teks di atas. Pastikan kamu menerjemahkan ATAU mengubah seluruh aksara Mandarin yang tersisa menjadi huruf Latin (Pinyin).\n` +
-          `SANGAT PENTING: TIDAK BOLEH ADA SATUPUN aksara Mandarin di jawaban akhirmu. Balas HANYA dengan hasil teks perbaikan yang utuh.`;
-
-        const correctionResult = await model.generateContent(correctionPrompt);
-        const correctionResponse = await correctionResult.response;
-        output = correctionResponse.text();
+      if (HANZI_RE.test(output)) {
+        console.warn("Hanzi terdeteksi di output, minta koreksi ulang...");
+        const correctionResult = await model.generateContent(
+          `Teks berikut masih mengandung aksara Mandarin yang belum diterjemahkan:\n\n${output}\n\n` +
+            `Perbaiki: terjemahkan atau ubah ke Pinyin SEMUA aksara Mandarin yang tersisa. ` +
+            `Balas HANYA dengan hasil perbaikan yang utuh.`
+        );
+        output = correctionResult.response.text().trim();
       }
 
-      console.log(`Gemini success (attempt ${attempt + 1}). Output starts: ${output.trim().substring(0, 50)}...`);
-      return output.trim();
+      if (normalize(output) === normalize(text)) {
+        throw new Error("Gemini mengembalikan teks yang tidak diterjemahkan (echo)");
+      }
 
+      return output;
     } catch (err) {
       const is429 = err.message?.includes("429") || err.status === 429;
       if (is429 && attempt < retries) {
-        // Parse retry delay from error if available, otherwise exponential backoff
         const retryMatch = err.message?.match(/(\d+)s/i);
         const waitSec = retryMatch ? parseInt(retryMatch[1], 10) + 2 : Math.pow(2, attempt + 2) * 5;
-        console.warn(`Rate limit hit (attempt ${attempt + 1}/${retries + 1}). Waiting ${waitSec}s before retry...`);
+        console.warn(`Rate limit (percobaan ${attempt + 1}/${retries + 1}). Tunggu ${waitSec}s...`);
         await new Promise((r) => setTimeout(r, waitSec * 1000));
         continue;
       }
       throw err;
     }
   }
+}
+
+function normalize(str) {
+  return str.replace(/\s+/g, "").trim();
 }
 
 async function translateWithGoogleTranslate(text, targetLang) {
