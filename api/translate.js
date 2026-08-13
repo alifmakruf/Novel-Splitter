@@ -25,7 +25,7 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-const GEMINI_MODEL = "gemini-2.5-flash-lite"; // best free-tier daily quota
+const GEMINI_MODEL = "gemini-3.1-flash-lite"; // current free-tier model (2.5-flash-lite is closed to new users)
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 export default async function handler(req, res) {
@@ -145,23 +145,51 @@ async function translateWithGoogleTranslate(text, targetLang) {
   return translatedChunks.join("\n");
 }
 
-// The free Google Translate endpoint caps request size (~5000 chars) - split
-// on paragraph breaks so we don't cut a sentence in half.
-function splitForGoogleTranslate(text, maxLen = 4500) {
-  if (text.length <= maxLen) return [text];
+// The free Google Translate endpoint takes the text as a GET query param, so
+// what actually limits chunk size is the ENCODED URL length, not raw
+// character count. Hanzi characters expand a lot under encodeURIComponent
+// (roughly 9 encoded chars per Hanzi in UTF-8), so a 4500-char raw chunk of
+// Chinese text could balloon past 40,000 encoded chars and get rejected
+// with a 413. We chunk based on encoded length instead, with a conservative
+// ceiling well under common server/proxy URL limits (~8000 chars).
+function splitForGoogleTranslate(text, maxEncodedLen = 1800) {
   const paragraphs = text.split("\n");
   const chunks = [];
   let current = "";
+
   for (const p of paragraphs) {
-    if ((current + "\n" + p).length > maxLen) {
+    const candidate = current ? current + "\n" + p : p;
+    if (encodeURIComponent(candidate).length > maxEncodedLen) {
       if (current) chunks.push(current);
-      current = p;
+      // A single paragraph can itself exceed the limit - hard-split it.
+      if (encodeURIComponent(p).length > maxEncodedLen) {
+        chunks.push(...hardSplitByEncodedLength(p, maxEncodedLen));
+        current = "";
+      } else {
+        current = p;
+      }
     } else {
-      current = current ? current + "\n" + p : p;
+      current = candidate;
     }
   }
   if (current) chunks.push(current);
-  return chunks;
+  return chunks.length > 0 ? chunks : [text];
+}
+
+function hardSplitByEncodedLength(text, maxEncodedLen) {
+  const pieces = [];
+  let current = "";
+  for (const char of text) {
+    const candidate = current + char;
+    if (encodeURIComponent(candidate).length > maxEncodedLen) {
+      pieces.push(current);
+      current = char;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) pieces.push(current);
+  return pieces;
 }
 
 function simpleHash(str) {
