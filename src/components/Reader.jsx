@@ -71,9 +71,16 @@ export default function Reader({
         style={{ background: "var(--ink-panel)", border: "1px solid var(--line)" }}
       >
         <div className="flex items-start justify-between gap-4 mb-5">
-          <h2 className="font-display text-lg" style={{ color: "var(--gold)" }}>
-            {chapter.title}
-          </h2>
+          <div>
+            {chapter.volumeLabel && (
+              <p className="text-xs mb-1" style={{ color: "var(--parchment-dim)" }}>
+                {chapter.volumeLabel}
+              </p>
+            )}
+            <h2 className="font-display text-lg" style={{ color: "var(--gold)" }}>
+              {chapter.title}
+            </h2>
+          </div>
 
           <div className="flex flex-wrap justify-end gap-2 shrink-0">
             <button

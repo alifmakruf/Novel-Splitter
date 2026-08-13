@@ -55,7 +55,7 @@ export default async function handler(req, res) {
       source = "google";
     } else {
       try {
-        translatedText = await translateWithGemini(text, targetLang);
+        translatedText = await translateWithGemini(text, targetLang, novelId);
         source = "gemini";
       } catch (geminiError) {
         console.warn("Gemini failed after retries, falling back to Google:", geminiError.message);
@@ -87,14 +87,25 @@ export default async function handler(req, res) {
   }
 }
 
-async function translateWithGemini(text, targetLang, retries = 3) {
+async function translateWithGemini(text, targetLang, novelId, retries = 3) {
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) throw new Error("GEMINI_API_KEY belum diset");
 
   const genAI = new GoogleGenerativeAI(apiKey);
   const model = genAI.getGenerativeModel({ model: GEMINI_MODEL });
 
+  // Pull previously-learned terms for THIS novel so names/istilah stay
+  // consistent across chapters instead of Gemini re-deciding a translation
+  // for the same name every time.
+  const glossary = await fetchGlossary(novelId);
+
   const langName = targetLang === "id" ? "Bahasa Indonesia" : "English";
+  const glossaryBlock =
+    glossary.length > 0
+      ? `\n\nISTILAH YANG SUDAH BAKU untuk novel ini (WAJIB dipakai persis seperti ini, jangan diterjemahkan ulang dengan cara lain):\n` +
+        glossary.map((g) => `${g.term_zh} => ${g.term_translated}`).join("\n")
+      : "";
+
   const prompt =
     `Terjemahkan seluruh teks novel Tionghoa berikut ke ${langName}.\n\n` +
     `ATURAN WAJIB:\n` +
@@ -102,14 +113,21 @@ async function translateWithGemini(text, targetLang, retries = 3) {
     `2. Perhatikan idiom (chengyu) dan istilah khas agar makna aslinya tidak melenceng.\n` +
     `3. TIDAK BOLEH ADA SATUPUN AKSARA MANDARIN/HANZI YANG TERSISA di hasil terjemahan.\n` +
     `4. Nama tokoh/tempat/jurus yang sulit diterjemahkan harfiah dikonversi ke Pinyin.\n` +
-    `5. Pertahankan jeda paragraf asli (baris baru) apa adanya, jangan digabung jadi satu paragraf besar.\n` +
-    `6. Balas HANYA dengan hasil terjemahan yang utuh, tanpa catatan atau teks tambahan.\n\n` +
+    `5. Pertahankan jeda paragraf asli (baris baru) apa adanya, jangan digabung jadi satu paragraf besar.` +
+    glossaryBlock +
+    `\n\n6. Di akhir jawabanmu, tambahkan baris "===ISTILAH_BARU===" diikuti daftar nama tokoh/tempat/jurus BARU ` +
+    `(yang belum ada di daftar istilah baku di atas) yang muncul di teks ini, format "istilah_asli => terjemahan" satu per baris. ` +
+    `Kalau tidak ada istilah baru, tulis "===ISTILAH_BARU===" lalu "(tidak ada)".\n` +
+    `7. Balas HANYA dengan hasil terjemahan + bagian ===ISTILAH_BARU=== di atas, tanpa catatan lain.\n\n` +
     `Teks:\n${text}`;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       const result = await model.generateContent(prompt);
-      let output = result.response.text().trim();
+      let raw = result.response.text().trim();
+
+      const { translation, newTerms } = splitGlossaryFromOutput(raw);
+      let output = translation;
 
       if (!output) throw new Error("Gemini mengembalikan hasil kosong");
 
@@ -126,6 +144,11 @@ async function translateWithGemini(text, targetLang, retries = 3) {
       if (normalize(output) === normalize(text)) {
         throw new Error("Gemini mengembalikan teks yang tidak diterjemahkan (echo)");
       }
+
+      // Best-effort: teach the glossary the new terms this chapter introduced.
+      // Doesn't block the response - a failed write here just means the next
+      // chapter won't benefit from these specific terms yet.
+      if (newTerms.length > 0) saveGlossaryTerms(novelId, newTerms).catch(() => {});
 
       return output;
     } catch (err) {
@@ -144,6 +167,70 @@ async function translateWithGemini(text, targetLang, retries = 3) {
 
 function normalize(str) {
   return str.replace(/\s+/g, "").trim();
+}
+
+// Pulls up to 300 previously-learned terms for this novel, oldest first (so
+// earlier-established terms - usually main characters - take priority if
+// the list ever needs trimming).
+async function fetchGlossary(novelId) {
+  if (!novelId) return [];
+  try {
+    const { data, error } = await supabase
+      .from("novel_glossary")
+      .select("term_zh, term_translated")
+      .eq("novel_id", novelId)
+      .order("created_at", { ascending: true })
+      .limit(300);
+    if (error) {
+      console.warn("Glossary fetch failed:", error.message);
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    console.warn("Glossary fetch failed:", err.message);
+    return [];
+  }
+}
+
+async function saveGlossaryTerms(novelId, terms) {
+  if (!novelId || terms.length === 0) return;
+  const rows = terms.map((t) => ({
+    novel_id: novelId,
+    term_zh: t.zh,
+    term_translated: t.translated,
+  }));
+  const { error } = await supabase
+    .from("novel_glossary")
+    .upsert(rows, { onConflict: "novel_id,term_zh", ignoreDuplicates: true });
+  if (error) console.warn("Glossary write failed:", error.message);
+}
+
+// Splits Gemini's raw output into the actual translation and the
+// "===ISTILAH_BARU===" section (new glossary terms), parsing lines like
+// "李明 => Li Ming" out of that section.
+function splitGlossaryFromOutput(raw) {
+  const marker = "===ISTILAH_BARU===";
+  const idx = raw.indexOf(marker);
+  if (idx === -1) return { translation: raw.trim(), newTerms: [] };
+
+  const translation = raw.slice(0, idx).trim();
+  const glossarySection = raw.slice(idx + marker.length).trim();
+
+  if (!glossarySection || /tidak ada/i.test(glossarySection)) {
+    return { translation, newTerms: [] };
+  }
+
+  const newTerms = glossarySection
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.includes("=>"))
+    .map((line) => {
+      const [zh, translated] = line.split("=>").map((s) => s.trim());
+      return { zh, translated };
+    })
+    .filter((t) => t.zh && t.translated);
+
+  return { translation, newTerms };
 }
 
 async function translateWithGoogleTranslate(text, targetLang) {

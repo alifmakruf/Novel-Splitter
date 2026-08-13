@@ -271,7 +271,7 @@ export default function App() {
               <Reader
                 novelId={novelId}
                 group={groups[activeGroupIndex]}
-                groupGlobalOffset={activeGroupIndex * 10}
+                groupGlobalOffset={groups[activeGroupIndex]?.globalOffset ?? 0}
                 activeLocalIndex={activeLocalIndex}
                 onSelectLocalIndex={setActiveLocalIndex}
                 translations={translations}

@@ -16,39 +16,51 @@ export default function ChapterEditor({ chapters, onMergeUp, onRenameChapter, on
       </div>
 
       <ul className="flex flex-col gap-2 max-h-[50vh] overflow-y-auto pr-1">
-        {chapters.map((chapter, i) => (
-          <li
-            key={i}
-            className="flex items-center gap-3 rounded-lg px-4 py-3"
-            style={{ background: "var(--ink-panel)", border: "1px solid var(--line)" }}
-          >
-            <span
-              className="shrink-0 text-xs w-7 h-7 flex items-center justify-center rounded-full font-display"
-              style={{
-                background: chapter.autoDetected ? "transparent" : "var(--ink-panel-raised)",
-                border: `1px solid ${chapter.autoDetected ? "var(--gold)" : "var(--line)"}`,
-                color: chapter.autoDetected ? "var(--gold)" : "var(--parchment-dim)",
-              }}
-            >
-              {i + 1}
-            </span>
-            <input
-              value={chapter.title}
-              onChange={(e) => onRenameChapter(i, e.target.value)}
-              className="flex-1 bg-transparent text-sm outline-none font-body"
-              style={{ color: "var(--parchment)" }}
-            />
-            {i > 0 && (
-              <button
-                onClick={() => onMergeUp(i)}
-                className="shrink-0 text-xs px-3 py-1.5 rounded-full transition-colors"
-                style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
+        {chapters.map((chapter, i) => {
+          const isNewVolume = chapter.volumeLabel && chapter.volumeLabel !== chapters[i - 1]?.volumeLabel;
+          return (
+            <li key={i} className="flex flex-col gap-2">
+              {isNewVolume && (
+                <div
+                  className="text-xs uppercase tracking-wide px-1 pt-2"
+                  style={{ color: "var(--gold)" }}
+                >
+                  {chapter.volumeLabel}
+                </div>
+              )}
+              <div
+                className="flex items-center gap-3 rounded-lg px-4 py-3"
+                style={{ background: "var(--ink-panel)", border: "1px solid var(--line)" }}
               >
-                Gabung ke atas
-              </button>
-            )}
-          </li>
-        ))}
+                <span
+                  className="shrink-0 text-xs w-7 h-7 flex items-center justify-center rounded-full font-display"
+                  style={{
+                    background: chapter.autoDetected ? "transparent" : "var(--ink-panel-raised)",
+                    border: `1px solid ${chapter.autoDetected ? "var(--gold)" : "var(--line)"}`,
+                    color: chapter.autoDetected ? "var(--gold)" : "var(--parchment-dim)",
+                  }}
+                >
+                  {i + 1}
+                </span>
+                <input
+                  value={chapter.title}
+                  onChange={(e) => onRenameChapter(i, e.target.value)}
+                  className="flex-1 bg-transparent text-sm outline-none font-body"
+                  style={{ color: "var(--parchment)" }}
+                />
+                {i > 0 && (
+                  <button
+                    onClick={() => onMergeUp(i)}
+                    className="shrink-0 text-xs px-3 py-1.5 rounded-full transition-colors"
+                    style={{ border: "1px solid var(--line)", color: "var(--parchment-dim)" }}
+                  >
+                    Gabung ke atas
+                  </button>
+                )}
+              </div>
+            </li>
+          );
+        })}
       </ul>
 
       <button

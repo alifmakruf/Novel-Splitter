@@ -4,7 +4,7 @@ export default function GroupNav({ groups, activeGroupIndex, onSelectGroup, tran
       {groups.map((group) => {
         const isActive = group.groupIndex === activeGroupIndex;
         const doneInGroup = group.chapters.filter(
-          (_, i) => translations[`chapter-${group.groupIndex * 10 + i}`]?.status === "done"
+          (_, i) => translations[`chapter-${group.globalOffset + i}`]?.status === "done"
         ).length;
 
         return (

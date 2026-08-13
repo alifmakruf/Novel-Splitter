@@ -20,7 +20,7 @@ export default function ChapterTabs({ chapters, groupGlobalOffset, activeLocalIn
               color: isActive ? "var(--parchment)" : "var(--parchment-dim)",
             }}
           >
-            <span>Bab {globalIndex + 1}</span>
+            <span>Bab {chapter.numberInVolume ?? globalIndex + 1}</span>
             {status && <span style={{ fontSize: "10px" }}>{STATUS_ICON[status]}</span>}
           </button>
         );
