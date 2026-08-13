@@ -16,7 +16,7 @@ export default function App() {
   const [chapters, setChapters] = useState([]);
   const [activeGroupIndex, setActiveGroupIndex] = useState(0);
 
-  const groups = useMemo(() => groupChapters(chapters, 10), [chapters]);
+  const groups = useMemo(() => groupChapters(chapters, 1), [chapters]);
 
   async function handleFileSelected(file) {
     setError(null);
