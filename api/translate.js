@@ -95,16 +95,35 @@ async function translateWithGemini(text, targetLang) {
   const prompt =
     `Terjemahkan seluruh teks novel Tionghoa berikut ke ${langName}.\n\n` +
     `ATURAN WAJIB:\n` +
-    `1. TIDAK BOLEH ADA SATUPUN AKSARA MANDARIN/HANZI YANG TERSISA DI HASIL TERJEMAHAN. Semua karakter Mandarin HARUS dihilangkan atau diterjemahkan.\n` +
-    `2. Semua nama tokoh, tempat, panggilan, atau jurus yang sulit diterjemahkan secara harfiah harus dikonversi ke huruf Latin (Pinyin).\n` +
-    `3. Balas HANYA dengan hasil terjemahan, tanpa catatan, penjelasan, atau teks tambahan apa pun.\n\n` +
+    `1. Terjemahkan dengan natural, perhatikan konteks cerita keseluruhan bab ini. Jangan menerjemahkan kata per kata (harfiah) jika itu merusak makna kalimat.\n` +
+    `2. Perhatikan idiom (chengyu) dan penggabungan karakter khusus agar makna aslinya tidak melenceng.\n` +
+    `3. TIDAK BOLEH ADA SATUPUN AKSARA MANDARIN/HANZI YANG TERSISA DI HASIL TERJEMAHAN. Semua karakter Mandarin HARUS dihilangkan atau diterjemahkan.\n` +
+    `4. Semua nama tokoh, tempat, panggilan, atau jurus yang sulit diterjemahkan secara harfiah harus dikonversi ke huruf Latin (Pinyin).\n` +
+    `5. Balas HANYA dengan hasil terjemahan yang utuh, tanpa catatan, penjelasan, atau teks tambahan apa pun.\n\n` +
     `Teks:\n${text}`;
 
   const result = await model.generateContent(prompt);
   const response = await result.response;
-  const output = response.text();
+  let output = response.text();
   
   if (!output.trim()) throw new Error("Gemini mengembalikan hasil kosong");
+
+  // Sistem Verifikasi: Cek apakah masih ada karakter Hanzi (Mandarin)
+  const hanziRegex = /[\u4e00-\u9fa5]/;
+  if (hanziRegex.test(output)) {
+    console.warn("Hanzi detected in output! Triggering self-correction...");
+    const correctionPrompt = 
+      `Teks berikut adalah hasil terjemahanmu sebelumnya, namun masih mengandung aksara Mandarin/Hanzi yang terlewat atau belum diterjemahkan:\n\n` +
+      `${output}\n\n` +
+      `TUGAS:\n` +
+      `Tolong perbaiki dan tulis ulang teks di atas. Pastikan kamu menerjemahkan ATAU mengubah seluruh aksara Mandarin yang tersisa menjadi huruf Latin (Pinyin).\n` +
+      `SANGAT PENTING: TIDAK BOLEH ADA SATUPUN aksara Mandarin di jawaban akhirmu. Balas HANYA dengan hasil teks perbaikan yang utuh.`;
+    
+    const correctionResult = await model.generateContent(correctionPrompt);
+    const correctionResponse = await correctionResult.response;
+    output = correctionResponse.text();
+  }
+
   console.log(`Gemini success. Output starts with: ${output.trim().substring(0, 50)}...`);
   return output.trim();
 }

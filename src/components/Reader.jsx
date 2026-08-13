@@ -1,31 +1,7 @@
 import { useState } from "react";
 import { translateChapter } from "../lib/translate.js";
 
-// Helper function to chunk text by paragraphs to avoid 413 or timeout errors.
-function chunkText(text, maxLength = 2000) {
-  const paragraphs = text.split("\n");
-  const chunks = [];
-  let currentChunk = "";
-
-  for (const p of paragraphs) {
-    if ((currentChunk.length + p.length + 1) > maxLength) {
-      if (currentChunk) chunks.push(currentChunk);
-      
-      if (p.length > maxLength) {
-        chunks.push(p);
-        currentChunk = "";
-      } else {
-        currentChunk = p;
-      }
-    } else {
-      currentChunk = currentChunk ? currentChunk + "\n" + p : p;
-    }
-  }
-  
-  if (currentChunk) chunks.push(currentChunk);
-  return chunks.length > 0 ? chunks : [text];
-}
-
+// No more frontend chunking! The backend handles it if needed.
 export default function Reader({ novelId, group }) {
   // chapterKey -> { text, status: 'idle'|'loading'|'done'|'error' }
   const [translations, setTranslations] = useState({});
@@ -39,28 +15,32 @@ export default function Reader({ novelId, group }) {
     setTranslations((prev) => ({ ...prev, [chapterKey]: { status: "loading" } }));
     
     try {
-      const chunks = chunkText(chapter.body, 2000);
       let translatedGemini = "";
       let translatedGoogle = "";
       
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-        const chunkKey = chunks.length > 1 ? `${chapterKey}-part${i}` : chapterKey;
-        
-        if (translationEngine === "gemini" || translationEngine === "both") {
-          const res = await translateChapter({ 
-            novelId, chapterKey: chunkKey, text: chunk, engine: "gemini" 
-          });
-          translatedGemini += (i > 0 ? "\n" : "") + res;
-        }
-
-        if (translationEngine === "google" || translationEngine === "both") {
-          const res = await translateChapter({ 
-            novelId, chapterKey: chunkKey, text: chunk, engine: "google" 
-          });
-          translatedGoogle += (i > 0 ? "\n" : "") + res;
-        }
+      // We no longer chunk text here. Send the entire chapter to the backend
+      // to preserve full context for Gemini.
+      
+      // Execute both engines concurrently if "both" is selected.
+      const promises = [];
+      
+      if (translationEngine === "gemini" || translationEngine === "both") {
+        promises.push(
+          translateChapter({ 
+            novelId, chapterKey, text: chapter.body, engine: "gemini" 
+          }).then(res => { translatedGemini = res; })
+        );
       }
+
+      if (translationEngine === "google" || translationEngine === "both") {
+        promises.push(
+          translateChapter({ 
+            novelId, chapterKey, text: chapter.body, engine: "google" 
+          }).then(res => { translatedGoogle = res; })
+        );
+      }
+      
+      await Promise.all(promises);
       
       let finalTranslatedText = "";
       if (translationEngine === "both") {
@@ -89,24 +69,44 @@ export default function Reader({ novelId, group }) {
   async function handleTranslateAll() {
     setIsTranslatingAll(true);
     
-    for (let i = 0; i < group.chapters.length; i++) {
-      const chapter = group.chapters[i];
-      const chapterKey = `${group.groupIndex}-${i}`;
-      
-      // Skip if already successfully translated
-      if (translations[chapterKey]?.status === "done") {
-        continue;
-      }
-      
-      setProgressMsg(`Menerjemahkan bab ${i + 1} dari ${group.chapters.length}...`);
-      
-      const result = await translateSingleChapter(chapter, i);
-      if (!result.success) {
-        setProgressMsg(`Berhenti pada bab ${i + 1} karena error: ${result.error}`);
-        setIsTranslatingAll(false);
-        return; // Stop translating on error
-      }
+    // Batch processing: process up to 3 chapters concurrently
+    const CONCURRENCY_LIMIT = 3;
+    let currentIndex = 0;
+    const chaptersToTranslate = group.chapters.map((c, i) => ({ chapter: c, index: i }))
+      .filter(({ index }) => translations[`${group.groupIndex}-${index}`]?.status !== "done");
+
+    if (chaptersToTranslate.length === 0) {
+      setProgressMsg("Semua bab sudah diterjemahkan.");
+      setIsTranslatingAll(false);
+      return;
     }
+
+    setProgressMsg(`Memulai penerjemahan ${chaptersToTranslate.length} bab tersisa...`);
+
+    const worker = async () => {
+      while (currentIndex < chaptersToTranslate.length) {
+        if (!isTranslatingAll) break; // User might have cancelled (if we implement cancel)
+        
+        const taskIndex = currentIndex++;
+        const { chapter, index } = chaptersToTranslate[taskIndex];
+        
+        setProgressMsg(`Menerjemahkan bab ${index + 1} dari ${group.chapters.length}... (${taskIndex + 1}/${chaptersToTranslate.length})`);
+        
+        const result = await translateSingleChapter(chapter, index);
+        if (!result.success) {
+          // Log but continue other chapters? Or stop all? Let's stop the remaining for this worker
+          setProgressMsg(`Error pada bab ${index + 1}: ${result.error}. Cek konsol.`);
+          console.error(`Bab ${index + 1} error:`, result.error);
+        }
+      }
+    };
+
+    const workers = [];
+    for (let i = 0; i < Math.min(CONCURRENCY_LIMIT, chaptersToTranslate.length); i++) {
+      workers.push(worker());
+    }
+
+    await Promise.all(workers);
     
     setProgressMsg("Selesai menerjemahkan semua bab.");
     setIsTranslatingAll(false);
